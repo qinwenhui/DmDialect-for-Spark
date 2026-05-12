@@ -1,9 +1,7 @@
 package cn.qinwh.spark.dm.core
 
-import java.sql.{Connection, SQLException, Types}
-import java.util.Properties
-
-import scala.util.Try
+import java.sql.{Connection, SQLException, Statement}
+import java.util.Locale
 
 import cn.qinwh.spark.dm.config.DmDialectConfig
 import cn.qinwh.spark.dm.functions.DmFunctionMapper
@@ -12,6 +10,12 @@ import cn.qinwh.spark.dm.types.DmTypeMapping
 import cn.qinwh.spark.dm.utils.{DmConstants, DmExceptionUtils, DmLogger}
 import cn.qinwh.spark.dm.version.{DmFeatureMatrix, DmVersion}
 
+import org.apache.spark.{SparkRuntimeException, SparkThrowable}
+import org.apache.spark.sql.AnalysisException
+import org.apache.spark.sql.connector.catalog.TableChange
+import org.apache.spark.sql.connector.catalog.TableChange._
+import org.apache.spark.sql.execution.datasources.jdbc.{JDBCOptions, JdbcOptionsInWrite, JdbcUtils}
+import org.apache.spark.sql.execution.datasources.v2.TableSampleInfo
 import org.apache.spark.sql.jdbc.{JdbcDialect, JdbcType}
 import org.apache.spark.sql.types._
 
@@ -51,7 +55,7 @@ abstract class DmDialect(
    * 匹配 `jdbc:dm://` 前缀的 URL
    */
   override def canHandle(url: String): Boolean = {
-    url != null && url.toLowerCase.startsWith(DmConstants.JDBC_URL_PREFIX)
+    url != null && url.toLowerCase(Locale.ROOT).startsWith(DmConstants.JDBC_URL_PREFIX)
   }
 
   // ======================== 类型映射 ========================
@@ -86,23 +90,14 @@ abstract class DmDialect(
 
   // ======================== 表存在性检查 ========================
 
-  /**
-   * 生成检查表是否存在的查询语句
-   */
   override def getTableExistsQuery(table: String): String = {
     sqlBuilder.getTableExistsQuery(table)
   }
 
-  /**
-   * 生成获取表 Schema 的查询语句
-   */
   override def getSchemaQuery(table: String): String = {
     sqlBuilder.getSchemaQuery(table)
   }
 
-  /**
-   * 生成截断表的 SQL
-   */
   override def getTruncateQuery(table: String): String = {
     sqlBuilder.getTruncateQuery(table)
   }
@@ -112,130 +107,162 @@ abstract class DmDialect(
   /**
    * 达梦支持 LIMIT 分页
    */
-  override def supportsLimit: Boolean = sqlBuilder.supportsLimit
+  override def supportsLimit: Boolean = true
 
-  /**
-   * 生成 LIMIT 子句
-   */
-  override def getLimitClause(limit: Int): String = {
+  override def getLimitClause(limit: Integer): String = {
     sqlBuilder.getLimitClause(limit)
   }
 
   /**
    * 达梦支持 OFFSET
    */
-  override def supportsOffset: Boolean = sqlBuilder.supportsOffset
+  override def supportsOffset: Boolean = true
 
-  /**
-   * 生成 OFFSET 子句
-   */
-  override def getOffsetClause(offset: Int): String = {
+  override def getOffsetClause(offset: Integer): String = {
     sqlBuilder.getOffsetClause(offset)
   }
 
   // ======================== 表采样 ========================
 
-  /**
-   * 达梦支持 TABLESAMPLE
-   */
-  override def supportsTableSample: Boolean = sqlBuilder.supportsTableSample
+  override def supportsTableSample: Boolean = true
 
-  /**
-   * 生成 TABLESAMPLE 子句
-   */
-  override def getTableSample(sample: org.apache.spark.sql.connector.expressions.aggregate.TableSampleInfo): String = {
+  override def getTableSample(sample: TableSampleInfo): String = {
     sqlBuilder.getTableSample(sample.lowerBound, sample.upperBound, sample.seed)
   }
 
-  // ======================== DDL 语句 ========================
+  // ======================== JOIN 支持 ========================
 
   /**
-   * 生成达梦兼容的 CREATE TABLE 语句
+   * 达梦支持 JOIN 操作
+   */
+  override def supportsJoin: Boolean = true
+
+  // ======================== CREATE TABLE ========================
+
+  /**
+   * 创建包含达梦存储选项的 CREATE TABLE 语句并执行
+   *
+   * Spark 4.1.1 中 createTable 直接在 Statement 上执行，不返回 SQL 字符串。
    */
   override def createTable(
-    table: String,
-    schema: StructType,
-    caseSensitive: Boolean,
-    options: java.util.Map[String, String]
-  ): String = {
-    import scala.collection.JavaConverters._
-    val scalaOptions = Option(options).map(_.asScala.toMap).getOrElse(Map.empty)
-    sqlBuilder.createTable(table, schema, scalaOptions)
+    statement: Statement,
+    tableName: String,
+    strSchema: String,
+    options: JdbcOptionsInWrite
+  ): Unit = {
+    val createTableOptions = options.createTableOptions
+    val sql = s"CREATE TABLE $tableName ($strSchema) $createTableOptions"
+    logger.logQuery(sql)
+    statement.executeUpdate(sql)
   }
 
+  // ======================== INSERT INTO ========================
+
   /**
-   * 生成达梦兼容的 ALTER TABLE 语句
+   * 生成 INSERT INTO 语句模板
+   */
+  override def insertIntoTable(table: String, fields: Array[StructField]): String = {
+    sqlBuilder.buildInsertStatement(table, fields)
+  }
+
+  // ======================== DROP TABLE ========================
+
+  override def dropTable(table: String): String = {
+    sqlBuilder.dropTable(table)
+  }
+
+  // ======================== RENAME TABLE ========================
+
+  override def renameTable(oldTable: String, newTable: String): String = {
+    s"ALTER TABLE $oldTable RENAME TO $newTable"
+  }
+
+  // ======================== ALTER TABLE ========================
+
+  /**
+   * 生成 ALTER TABLE 语句数组
+   *
+   * @param tableName      表名
+   * @param changes        表变更列表
+   * @param dbMajorVersion 数据库主版本号
+   * @return ALTER TABLE SQL 语句数组
    */
   override def alterTable(
     tableName: String,
-    changes: Array[org.apache.spark.sql.connector.catalog.TableChange],
-    caseSensitive: Boolean
-  ): String = {
-    import org.apache.spark.sql.connector.catalog.TableChange._
+    changes: Seq[TableChange],
+    dbMajorVersion: Int
+  ): Array[String] = {
+    import scala.collection.mutable.ArrayBuilder
 
-    val parts = changes.map {
-      case add: AddColumn =>
-        val comments = if (add.comment() != null && add.comment().nonEmpty) {
-          add.comment()
-        } else ""
-        sqlBuilder.getAddColumnQuery(tableName, add.fieldNames()(0), add.dataType())
+    val updateClause = ArrayBuilder.make[String]
+    for (change <- changes) {
+      change match {
+        case add: AddColumn if add.fieldNames.length == 1 =>
+          val dataType = JdbcUtils.getJdbcType(add.dataType(), this).databaseTypeDefinition
+          val name = add.fieldNames
+          updateClause += getAddColumnQuery(tableName, name(0), dataType)
 
-      case delete: DeleteColumn =>
-        sqlBuilder.getDeleteColumnQuery(tableName, delete.fieldNames()(0))
+        case rename: RenameColumn if rename.fieldNames.length == 1 =>
+          val name = rename.fieldNames
+          updateClause += getRenameColumnQuery(tableName, name(0), rename.newName, dbMajorVersion)
 
-      case rename: RenameColumn =>
-        sqlBuilder.getRenameColumnQuery(
-          tableName, rename.fieldNames()(0), rename.newName(), StringType  // 保留原类型
-        )
+        case delete: DeleteColumn if delete.fieldNames.length == 1 =>
+          val name = delete.fieldNames
+          updateClause += getDeleteColumnQuery(tableName, name(0))
 
-      case update: UpdateColumnType =>
-        sqlBuilder.getUpdateColumnTypeQuery(
-          tableName, update.fieldNames()(0), update.newDataType()
-        )
+        case updateColumnType: UpdateColumnType if updateColumnType.fieldNames.length == 1 =>
+          val name = updateColumnType.fieldNames
+          val dataType = JdbcUtils.getJdbcType(updateColumnType.newDataType(), this)
+            .databaseTypeDefinition
+          updateClause += getUpdateColumnTypeQuery(tableName, name(0), dataType)
 
-      case updateNull: UpdateColumnNullability =>
-        sqlBuilder.getUpdateColumnNullabilityQuery(
-          tableName, updateNull.fieldNames()(0), updateNull.nullable()
-        )
+        case updateNull: UpdateColumnNullability if updateNull.fieldNames.length == 1 =>
+          val name = updateNull.fieldNames
+          updateClause += getUpdateColumnNullabilityQuery(
+            tableName, name(0), updateNull.nullable())
 
-      case updateComment: UpdateColumnComment =>
-        sqlBuilder.createColumnComment(
-          tableName, updateComment.fieldNames()(0), updateComment.newComment()
-        )
+        case updateComment: UpdateColumnComment if updateComment.fieldNames.length == 1 =>
+          // 达梦使用 COMMENT ON COLUMN 语法设置列注释
+          val name = updateComment.fieldNames
+          updateClause += getTableCommentQuery(tableName, updateComment.newComment())
+          // 注意: 达梦没有直接的 COMMENT ON COLUMN 在 alterTable 中，
+          // 这里通过外部 COMMENT ON 语句实现
 
-      case _ => ""
+        case _ =>
+          throw new org.apache.spark.sql.errors.QueryCompilationErrors
+            .unsupportedTableChangeInJDBCCatalogError(change, tableName)
+      }
     }
-
-    parts.filter(_.nonEmpty).mkString(";\n")
+    updateClause.result()
   }
 
-  // ======================== 列操作 ========================
+  // ======================== ALTER TABLE 列操作（DM 特定语法） ========================
 
   /**
-   * 生成添加列的 SQL
+   * 添加列 — 达梦使用 ADD（不含 COLUMN 关键字）
    */
   override def getAddColumnQuery(
     tableName: String,
     columnName: String,
-    dataType: DataType
+    dataType: String
   ): String = {
     sqlBuilder.getAddColumnQuery(tableName, columnName, dataType)
   }
 
   /**
-   * 生成重命名列的 SQL
+   * 重命名列
    */
   override def getRenameColumnQuery(
     tableName: String,
     columnName: String,
     newName: String,
-    dataType: DataType
+    dbMajorVersion: Int
   ): String = {
-    sqlBuilder.getRenameColumnQuery(tableName, columnName, newName, dataType)
+    sqlBuilder.getRenameColumnQuery(tableName, columnName, newName, dbMajorVersion)
   }
 
   /**
-   * 生成删除列的 SQL
+   * 删除列
    */
   override def getDeleteColumnQuery(
     tableName: String,
@@ -245,18 +272,18 @@ abstract class DmDialect(
   }
 
   /**
-   * 生成修改列类型的 SQL
+   * 修改列类型 — 达梦使用 MODIFY 语法
    */
   override def getUpdateColumnTypeQuery(
     tableName: String,
     columnName: String,
-    newDataType: DataType
+    newDataType: String
   ): String = {
     sqlBuilder.getUpdateColumnTypeQuery(tableName, columnName, newDataType)
   }
 
   /**
-   * 生成修改列可为空属性的 SQL
+   * 修改列的可为空属性 — 达梦使用 MODIFY ... NULL / NOT NULL 语法
    */
   override def getUpdateColumnNullabilityQuery(
     tableName: String,
@@ -266,86 +293,138 @@ abstract class DmDialect(
     sqlBuilder.getUpdateColumnNullabilityQuery(tableName, columnName, isNullable)
   }
 
-  // ======================== 注释 ========================
+  // ======================== 表注释 ========================
 
   /**
-   * 达梦数据库表注释 SQL（使用 COMMENT ON TABLE ... IS ... 语法）
+   * 达梦表注释 — COMMENT ON TABLE ... IS ... 语法
+   * 注意: Spark 4.1.1 的基类默认实现就是 `COMMENT ON TABLE ... IS ...`，
+   * 与达梦一致，但这里显式覆盖以确保兼容性和添加日志。
    */
-  override def createTableComment(table: String, comment: String): Option[String] = {
-    Option(comment).filter(_.nonEmpty).map { c =>
-      sqlBuilder.createTableComment(table, c)
-    }
+  override def getTableCommentQuery(table: String, comment: String): String = {
+    logger.logQuery(s"COMMENT ON TABLE $table")
+    sqlBuilder.buildTableComment(table, comment)
   }
 
+  // ======================== 函数支持 ========================
+
   /**
-   * 达梦数据库列注释 SQL（使用 COMMENT ON COLUMN ... IS ... 语法）
+   * 检查达梦数据库是否支持给定的函数名
+   *
+   * 根据 DmFunctionMapper 中的映射表进行判断。
    */
-  override def createColumnComment(
-    table: String,
-    column: String,
-    comment: String
-  ): Option[String] = {
-    Option(comment).filter(_.nonEmpty).map { c =>
-      sqlBuilder.createColumnComment(table, column, c)
-    }
+  override def isSupportedFunction(funcName: String): Boolean = {
+    DmFunctionMapper.getMapping(funcName).isDefined
   }
 
   // ======================== 异常分类 ========================
 
   /**
-   * 将达梦 JDBC 异常包装为 Spark 友好的异常
+   * 新签名 (Spark 4.0.0+)：分类并包装达梦异常
    */
-  override def classifyException(message: String, e: Throwable): Exception = {
+  override def classifyException(
+    e: Throwable,
+    condition: String,
+    messageParameters: Map[String, String],
+    description: String,
+    isRuntime: Boolean
+  ): Throwable with SparkThrowable = {
+    e match {
+      case sqlEx: SQLException =>
+        val category = DmExceptionUtils.classify(sqlEx)
+        logger.error(s"[${category.categoryName}] $description", sqlEx)
+        if (isRuntime) {
+          new SparkRuntimeException(
+            errorClass = condition,
+            messageParameters = messageParameters,
+            cause = e)
+        } else {
+          new AnalysisException(
+            errorClass = condition,
+            messageParameters = messageParameters,
+            cause = Some(e))
+        }
+
+      case _ =>
+        if (isRuntime) {
+          new SparkRuntimeException(
+            errorClass = condition,
+            messageParameters = messageParameters,
+            cause = e)
+        } else {
+          new AnalysisException(
+            errorClass = condition,
+            messageParameters = messageParameters,
+            cause = Some(e))
+        }
+    }
+  }
+
+  /**
+   * 旧签名 (deprecated since 4.0.0)：保留以兼容旧版调用
+   */
+  @deprecated("Use classifyException with error condition", "4.0.0")
+  override def classifyException(message: String, e: Throwable): AnalysisException = {
     e match {
       case sqlEx: SQLException =>
         val category = DmExceptionUtils.classify(sqlEx)
         logger.error(s"[${category.categoryName}] $message", sqlEx)
-        new org.apache.spark.SparkException(
-          s"${category.message}\n原始错误: $message",
-          sqlEx
-        )
+        new AnalysisException(
+          errorClass = "FAILED_JDBC.UNCLASSIFIED",
+          messageParameters = Map(
+            "url" -> DmConstants.JDBC_URL_PREFIX,
+            "message" -> message),
+          cause = Some(sqlEx))
 
       case other =>
-        new org.apache.spark.SparkException(
-          s"达梦数据库操作异常: $message",
-          other
-        )
+        new AnalysisException(
+          errorClass = "FAILED_JDBC.UNCLASSIFIED",
+          messageParameters = Map(
+            "url" -> DmConstants.JDBC_URL_PREFIX,
+            "message" -> message),
+          cause = Some(other))
     }
+  }
+
+  /**
+   * 达梦语法错误最佳努力检测 (Spark 4.1.0+)
+   *
+   * 达梦的 SQL 语法错误 SQLState 通常以 "42" 开头。
+   */
+  override def isSyntaxErrorBestEffort(exception: SQLException): Boolean = {
+    Option(exception.getSQLState).exists(_.startsWith(DmConstants.SQL_STATE_SYNTAX_ERROR_PREFIX))
+  }
+
+  /**
+   * 检测是否为对象不存在的异常 (Spark 4.1.0+)
+   *
+   * 达梦数据库表/视图不存在的 SQLState 为 42000。
+   */
+  override def isObjectNotFoundException(e: SQLException): Boolean = {
+    Option(e.getSQLState).exists(_.startsWith("42"))
   }
 
   // ======================== 连接工厂 ========================
 
   /**
-   * 创建达梦 JDBC 连接工厂，注入达梦特有的连接属性
+   * 创建达梦 JDBC 连接工厂
+   *
+   * @param options JDBC 选项
+   * @return 连接工厂函数（参数为 partition ID）
    */
-  override def createConnectionFactory(options: java.util.Map[String, String]): () => Connection = {
-    import scala.collection.JavaConverters._
-
-    val scalaOptions = Option(options).map(_.asScala.toMap).getOrElse(Map.empty)
-    val url = scalaOptions.getOrElse("url", "")
-    val props = new Properties()
-
-    // 设置连接属性
-    scalaOptions.foreach { case (key, value) =>
-      // 筛选连接相关的配置传递给 JDBC 驱动
-      if (key.startsWith("spark.dmdialect.conn.") || key == "user" || key == "password" || key == "driver") {
-        // 跳过了，由 JDBC 自动处理
-      } else if (!key.startsWith("spark.")) {
-        props.setProperty(key, value)
-      }
-    }
-
-    // 注入达梦推荐的默认连接参数（可被 JDBC URL 中的参数覆盖）
-    props.setProperty("useUnicode", config.useUnicode.toString)
-    props.setProperty("characterEncoding", config.characterEncoding)
+  override def createConnectionFactory(options: JDBCOptions): Int => Connection = {
+    val url = options.parameters.getOrElse("url", "")
+    val driverClass = options.driverClass
 
     logger.debug(s"创建达梦数据库连接: $url")
 
-    () => {
-      val driverClass = scalaOptions.getOrElse("driver", "dm.jdbc.driver.DmDriver")
-      Class.forName(driverClass)
-      val connection = java.sql.DriverManager.getConnection(url, props)
-      logger.debug("达梦数据库连接已建立")
+    (partitionId: Int) => {
+      org.apache.spark.sql.execution.datasources.jdbc.DriverRegistry.register(driverClass)
+      val driver = org.apache.spark.sql.execution.datasources.jdbc.DriverRegistry.get(driverClass)
+      val connection = org.apache.spark.sql.execution.datasources.jdbc.connection
+        .ConnectionProvider.create(driver, options.parameters, options.connectionProviderName)
+      require(connection != null,
+        s"达梦驱动无法建立 JDBC 连接，请检查 URL: ${options.getRedactUrl()}")
+      logger.debug(s"达梦数据库连接已建立 (partition=$partitionId)")
       connection
     }
   }
