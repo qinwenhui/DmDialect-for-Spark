@@ -128,8 +128,7 @@ class DmDialectProvider extends JdbcDialect {
     strSchema: String,
     options: JdbcOptionsInWrite
   ): Unit = {
-    import scala.collection.JavaConverters._
-    val scalaOptions = options.parameters.asScala.toMap
+    val scalaOptions = options.parameters.toMap
     ensureInitialized(Some(scalaOptions)).createTable(statement, tableName, strSchema, options)
   }
 
@@ -205,8 +204,7 @@ class DmDialectProvider extends JdbcDialect {
   // ======================== 连接工厂委托 ========================
 
   override def createConnectionFactory(options: JDBCOptions): Int => Connection = {
-    import scala.collection.JavaConverters._
-    val scalaOptions = options.parameters.asScala.toMap
+    val scalaOptions = options.parameters.toMap
     ensureInitialized(Some(scalaOptions)).createConnectionFactory(options)
   }
 

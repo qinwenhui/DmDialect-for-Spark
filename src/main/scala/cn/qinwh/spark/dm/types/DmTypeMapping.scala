@@ -155,11 +155,12 @@ class DmTypeMapping(config: DmDialectConfig) {
     case DoubleType =>
       JdbcType("DOUBLE PRECISION", DOUBLE)
 
-    case DecimalType.Fixed(precision, scale) =>
-      JdbcType(s"DECIMAL($precision,$scale)", DECIMAL)
-
-    case DecimalType.Unlimited =>
-      JdbcType("NUMBER", DECIMAL)
+    case d: DecimalType =>
+      if (d.precision > 0) {
+        JdbcType(s"DECIMAL(${d.precision},${d.scale})", DECIMAL)
+      } else {
+        JdbcType("NUMBER", DECIMAL)
+      }
 
     case StringType =>
       JdbcType(s"VARCHAR2($DEFAULT_VARCHAR2_SIZE)", VARCHAR)
@@ -176,10 +177,10 @@ class DmTypeMapping(config: DmDialectConfig) {
     case TimestampType =>
       JdbcType("TIMESTAMP", TIMESTAMP)
 
-    case YearMonthIntervalType() =>
+    case _: YearMonthIntervalType =>
       JdbcType("INTERVAL YEAR TO MONTH", VARCHAR)
 
-    case DayTimeIntervalType() =>
+    case _: DayTimeIntervalType =>
       JdbcType("INTERVAL DAY TO SECOND", VARCHAR)
 
     case _: CharType =>

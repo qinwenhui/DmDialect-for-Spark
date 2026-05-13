@@ -10,7 +10,7 @@ import cn.qinwh.spark.dm.types.DmTypeMapping
 import cn.qinwh.spark.dm.utils.{DmConstants, DmExceptionUtils, DmLogger}
 import cn.qinwh.spark.dm.version.{DmFeatureMatrix, DmVersion}
 
-import org.apache.spark.{SparkRuntimeException, SparkThrowable}
+import org.apache.spark.{SparkException, SparkThrowable}
 import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.connector.catalog.TableChange
 import org.apache.spark.sql.connector.catalog.TableChange._
@@ -229,8 +229,8 @@ abstract class DmDialect(
           // 这里通过外部 COMMENT ON 语句实现
 
         case _ =>
-          throw new org.apache.spark.sql.errors.QueryCompilationErrors
-            .unsupportedTableChangeInJDBCCatalogError(change, tableName)
+          throw new IllegalArgumentException(
+            s"达梦数据库不支持此表变更操作: ${change.getClass.getSimpleName}, 表名: $tableName")
       }
     }
     updateClause.result()
@@ -333,7 +333,7 @@ abstract class DmDialect(
         val category = DmExceptionUtils.classify(sqlEx)
         logger.error(s"[${category.categoryName}] $description", sqlEx)
         if (isRuntime) {
-          new SparkRuntimeException(
+          new SparkException(
             errorClass = condition,
             messageParameters = messageParameters,
             cause = e)
@@ -346,7 +346,7 @@ abstract class DmDialect(
 
       case _ =>
         if (isRuntime) {
-          new SparkRuntimeException(
+          new SparkException(
             errorClass = condition,
             messageParameters = messageParameters,
             cause = e)
@@ -425,16 +425,22 @@ abstract class DmDialect(
   override def createConnectionFactory(options: JDBCOptions): Int => Connection = {
     val url = options.parameters.getOrElse("url", "")
     val driverClass = options.driverClass
+    val connectionProperties = new java.util.Properties()
+
+    // 将 options.parameters 中非 Spark 内部的配置传递给 JDBC 驱动
+    options.parameters.foreach { case (k, v) =>
+      if (!k.startsWith("spark.") && k != "url" && k != "driver") {
+        connectionProperties.setProperty(k, v)
+      }
+    }
 
     logger.debug(s"创建达梦数据库连接: $url")
 
     (partitionId: Int) => {
-      org.apache.spark.sql.execution.datasources.jdbc.DriverRegistry.register(driverClass)
-      val driver = org.apache.spark.sql.execution.datasources.jdbc.DriverRegistry.get(driverClass)
-      val connection = org.apache.spark.sql.execution.datasources.jdbc.connection
-        .ConnectionProvider.create(driver, options.parameters, options.connectionProviderName)
+      Class.forName(driverClass)
+      val connection = java.sql.DriverManager.getConnection(url, connectionProperties)
       require(connection != null,
-        s"达梦驱动无法建立 JDBC 连接，请检查 URL: ${options.getRedactUrl()}")
+        s"达梦驱动无法建立 JDBC 连接，请检查 URL: $url")
       logger.debug(s"达梦数据库连接已建立 (partition=$partitionId)")
       connection
     }
