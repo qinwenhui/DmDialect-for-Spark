@@ -35,7 +35,7 @@ Spark 通过 JDBC 访问数据库时，依靠 `JdbcDialect` 进行 **类型映�
 ### 构建
 
 ```bash
-git clone <仓库地址>
+git clone https://github.com/qinwenhui/DmDialect-for-Spark.git
 cd DmDialect-for-spark
 mvn clean package
 ```
