@@ -214,7 +214,7 @@ object DmExceptionUtils {
 /**
  * 达梦异常分类的密封特质
  */
-sealed trait DmExceptionCategory {
+sealed trait DmExceptionCategory extends Serializable {
   val exception: SQLException
   def categoryName: String
   def message: String

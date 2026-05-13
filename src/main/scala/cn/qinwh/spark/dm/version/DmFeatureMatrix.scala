@@ -9,7 +9,7 @@ package cn.qinwh.spark.dm.version
  *
  * @author qinwh
  */
-class DmFeatureMatrix(val version: DmVersion) {
+class DmFeatureMatrix(val version: DmVersion) extends Serializable {
 
   /**
    * 是否支持 JSON 数据类型

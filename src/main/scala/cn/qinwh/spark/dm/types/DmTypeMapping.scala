@@ -18,7 +18,7 @@ import org.apache.spark.sql.types._
  *
  * @author qinwh
  */
-class DmTypeMapping(config: DmDialectConfig) {
+class DmTypeMapping(config: DmDialectConfig) extends Serializable {
 
   /**
    * 将达梦 JDBC 类型转换为 Spark Catalyst DataType

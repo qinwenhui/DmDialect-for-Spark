@@ -10,7 +10,7 @@ import org.slf4j.{Logger, LoggerFactory}
  *
  * @author qinwh
  */
-class DmLogger(debugEnabled: Boolean, logQueries: Boolean) {
+class DmLogger(debugEnabled: Boolean, logQueries: Boolean) extends Serializable {
 
   private val logger: Logger = LoggerFactory.getLogger(classOf[DmLogger])
 

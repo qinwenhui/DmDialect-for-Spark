@@ -29,7 +29,7 @@ class DmSqlBuilder(
   typeMapping: DmTypeMapping,
   logger: DmLogger,
   storageClause: String = "STORAGE(ON \"MAIN\", CLUSTERBTR)"
-) {
+) extends Serializable {
 
   import DmStringUtils._
 
