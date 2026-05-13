@@ -52,3 +52,6 @@ dist/
 # OS
 Thumbs.db
 Desktop.ini
+
+# Windows artifacts
+nul
