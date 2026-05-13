@@ -38,10 +38,13 @@ class DmSqlBuilder(
   /**
    * 使用达梦双引号规则引用标识符（列名、表名等）
    *
+   * 大小写处理：
+   * - `caseSensitive = false`（默认）：达梦默认不区分大小写，标识符存储为大写。
+   *   先将标识符转大写再加双引号，确保 `my_table` → `"MY_TABLE"` 能匹配数据库中存储的大写形式。
+   * - `caseSensitive = true`：达梦配置了区分大小写（CASE_SENSITIVE=1），保留原样。
+   *
    * 特殊处理：
-   * - 如果以 `(` 开头，说明是子查询表达式（如 `(SELECT ...) as tmp`），
-   *   不添加引号，直接原样返回。
-   * - 普通列名/表名：用双引号包裹，内部双引号转义为 `""`。
+   * - 如果以 `(` 开头，说明是子查询表达式，不添加引号，直接原样返回。
    */
   def quoteIdentifier(identifier: String): String = {
     if (identifier == null || identifier.isEmpty) return "\"\""
@@ -49,7 +52,9 @@ class DmSqlBuilder(
     // 子查询（括号开头）不添加引号
     if (trimmed.startsWith("(")) return identifier
     val unquoted = unquoteIdentifier(identifier)
-    "\"" + unquoted.replace("\"", "\"\"") + "\""
+    // 大小写处理：不敏感时转大写，匹配 DM 默认的标识符存储形式
+    val cased = if (config.caseSensitive) unquoted else unquoted.toUpperCase
+    "\"" + cased.replace("\"", "\"\"") + "\""
   }
 
   // ======================== 建表 ========================

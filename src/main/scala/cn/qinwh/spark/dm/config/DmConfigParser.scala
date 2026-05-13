@@ -33,7 +33,8 @@ object DmConfigParser {
       useUnicode = getBoolean(KEY_USE_UNICODE, DEFAULT_USE_UNICODE, jdbcOptions, sparkConf),
       characterEncoding = getString(KEY_CHAR_ENCODING, DEFAULT_CHAR_ENCODING, jdbcOptions, sparkConf),
       loggingEnabled = getBoolean(KEY_LOGGING_ENABLED, DEFAULT_LOGGING_ENABLED, jdbcOptions, sparkConf),
-      logQueries = getBoolean(KEY_LOG_QUERIES, DEFAULT_LOG_QUERIES, jdbcOptions, sparkConf)
+      logQueries = getBoolean(KEY_LOG_QUERIES, DEFAULT_LOG_QUERIES, jdbcOptions, sparkConf),
+      caseSensitive = getBoolean(KEY_CASE_SENSITIVE, DEFAULT_CASE_SENSITIVE, jdbcOptions, sparkConf)
     )
   }
 

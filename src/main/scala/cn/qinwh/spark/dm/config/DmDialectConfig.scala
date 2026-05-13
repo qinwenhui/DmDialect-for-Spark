@@ -14,6 +14,7 @@ package cn.qinwh.spark.dm.config
  * @param characterEncoding       连接参数：字符编码
  * @param loggingEnabled          是否开启方言内部的 DEBUG 日志
  * @param logQueries              是否在日志中打印生成的 SQL
+ * @param caseSensitive           达梦数据库是否区分标识符大小写（默认 false）
  *
  * @author qinwh
  */
@@ -25,7 +26,8 @@ case class DmDialectConfig(
   useUnicode: Boolean = DmDialectConfig.DEFAULT_USE_UNICODE,
   characterEncoding: String = DmDialectConfig.DEFAULT_CHAR_ENCODING,
   loggingEnabled: Boolean = DmDialectConfig.DEFAULT_LOGGING_ENABLED,
-  logQueries: Boolean = DmDialectConfig.DEFAULT_LOG_QUERIES
+  logQueries: Boolean = DmDialectConfig.DEFAULT_LOG_QUERIES,
+  caseSensitive: Boolean = DmDialectConfig.DEFAULT_CASE_SENSITIVE
 )
 
 object DmDialectConfig {
@@ -43,6 +45,7 @@ object DmDialectConfig {
   val KEY_CHAR_ENCODING: String = s"$PREFIX.conn.characterEncoding"
   val KEY_LOGGING_ENABLED: String = s"$PREFIX.logging.enabled"
   val KEY_LOG_QUERIES: String = s"$PREFIX.logging.logQueries"
+  val KEY_CASE_SENSITIVE: String = s"$PREFIX.caseSensitive"
 
   // ======================== 默认值 ========================
 
@@ -54,6 +57,7 @@ object DmDialectConfig {
   val DEFAULT_CHAR_ENCODING: String = "UTF-8"
   val DEFAULT_LOGGING_ENABLED: Boolean = false
   val DEFAULT_LOG_QUERIES: Boolean = false
+  val DEFAULT_CASE_SENSITIVE: Boolean = false
 
   /** 创建使用所有默认值的配置实例 */
   def defaultConfig: DmDialectConfig = DmDialectConfig()
