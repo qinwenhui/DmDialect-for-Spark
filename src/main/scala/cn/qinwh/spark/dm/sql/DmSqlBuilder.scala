@@ -36,10 +36,18 @@ class DmSqlBuilder(
   // ======================== 标识符引用 ========================
 
   /**
-   * 使用达梦双引号规则引用标识符
+   * 使用达梦双引号规则引用标识符（列名、表名等）
+   *
+   * 特殊处理：
+   * - 如果以 `(` 开头，说明是子查询表达式（如 `(SELECT ...) as tmp`），
+   *   不添加引号，直接原样返回。
+   * - 普通列名/表名：用双引号包裹，内部双引号转义为 `""`。
    */
   def quoteIdentifier(identifier: String): String = {
     if (identifier == null || identifier.isEmpty) return "\"\""
+    val trimmed = identifier.trim
+    // 子查询（括号开头）不添加引号
+    if (trimmed.startsWith("(")) return identifier
     val unquoted = unquoteIdentifier(identifier)
     "\"" + unquoted.replace("\"", "\"\"") + "\""
   }
