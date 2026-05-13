@@ -388,18 +388,29 @@ abstract class DmDialect(
   /**
    * 达梦语法错误最佳努力检测 (Spark 4.1.0+)
    *
-   * 达梦的 SQL 语法错误 SQLState 通常以 "42" 开头。
+   * 以达梦 errorCode 为主要判断依据。
+   * Spark 默认通过 SQLState.startsWith("42") 判断，但达梦的语法错误 SQLState
+   * 不可靠，因此必须使用达梦厂商错误码（如 -2007）。
+   *
+   * 降级：当 errorCode 未命中已知值时，回退到 SQLState "42" 判断。
    */
   override def isSyntaxErrorBestEffort(exception: SQLException): Boolean = {
-    Option(exception.getSQLState).exists(_.startsWith(DmConstants.SQL_STATE_SYNTAX_ERROR_PREFIX))
+    DmExceptionUtils.isSyntaxError(exception) ||
+    Option(exception.getSQLState).exists(_.startsWith("42"))
   }
 
   /**
    * 检测是否为对象不存在的异常 (Spark 4.1.0+)
    *
-   * 达梦数据库表/视图不存在的 SQLState 为 42000。
+   * 以达梦 errorCode 为主要判断依据。
+   * Spark 默认通过 SQLState.startsWith("42") 判断，但达梦"无效的表或视图名"
+   * (错误码 -2106) 的 SQLState 并非 "42" 开头，这正是本项目需要自定义方言
+   * 的核心原因之一。
+   *
+   * 降级：当 errorCode 未命中已知值时，回退到 SQLState "42" 判断。
    */
   override def isObjectNotFoundException(e: SQLException): Boolean = {
+    DmExceptionUtils.isObjectNotFound(e) ||
     Option(e.getSQLState).exists(_.startsWith("42"))
   }
 
