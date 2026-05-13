@@ -55,7 +55,8 @@ class DmSqlBuilder(
   def buildCreateTableSchema(schema: StructType): String = {
     schema.fields.map { field =>
       val colName = quoteIdentifier(field.name)
-      val jdbcType = typeMapping.getJDBCType(field.dataType)
+      // 使用 getJDBCTypeForField 以支持 CLOB 大字符串自动选择
+      val jdbcType = typeMapping.getJDBCTypeForField(field)
       val nullable = if (field.nullable) "" else " NOT NULL"
       s"$colName ${jdbcType.databaseTypeDefinition}$nullable"
     }.mkString(", ")

@@ -12,6 +12,7 @@ import cn.qinwh.spark.dm.version.{DmFeatureMatrix, DmVersion}
 
 import org.apache.spark.{SparkException, SparkThrowable}
 import org.apache.spark.sql.AnalysisException
+import org.apache.spark.sql.catalyst.SQLConfHelper
 import org.apache.spark.sql.connector.catalog.TableChange
 import org.apache.spark.sql.connector.catalog.TableChange._
 import org.apache.spark.sql.execution.datasources.jdbc.{JDBCOptions, JdbcOptionsInWrite, JdbcUtils}
@@ -35,7 +36,7 @@ abstract class DmDialect(
   val config: DmDialectConfig,
   val version: DmVersion,
   val features: DmFeatureMatrix
-) extends JdbcDialect {
+) extends JdbcDialect with SQLConfHelper {
 
   /** 日志记录器 */
   protected val logger: DmLogger = DmLogger(config.loggingEnabled, config.logQueries)
@@ -69,7 +70,20 @@ abstract class DmDialect(
     size: Int,
     md: MetadataBuilder
   ): Option[DataType] = {
-    Some(typeMapping.getCatalystType(sqlType, typeName, size, md))
+    // 对于无法明确识别的类型返回 None，让 Spark 默认逻辑兜底
+    val upperTypeName = if (typeName != null) typeName.toUpperCase.trim else ""
+    (sqlType, upperTypeName) match {
+      // 达梦特有类型
+      case (java.sql.Types.OTHER, t) if t == "JSON" || t == "TEXT" || t == "IMAGE" || t == "VOID" =>
+        Some(typeMapping.getCatalystType(sqlType, typeName, size, md))
+      case (java.sql.Types.OTHER, _) =>
+        // 无法识别的 OTHER 类型，让 Spark 默认处理
+        None
+      case (java.sql.Types.NULL, _) =>
+        Some(NullType)
+      case _ =>
+        Some(typeMapping.getCatalystType(sqlType, typeName, size, md))
+    }
   }
 
   /**
@@ -150,8 +164,14 @@ abstract class DmDialect(
     strSchema: String,
     options: JdbcOptionsInWrite
   ): Unit = {
-    val createTableOptions = options.createTableOptions
-    val sql = s"CREATE TABLE $tableName ($strSchema) $createTableOptions"
+    val userOptions = options.createTableOptions
+    val tableOptions = if (userOptions != null && userOptions.nonEmpty) {
+      userOptions
+    } else {
+      // 用户未指定建表选项时，使用达梦默认存储子句
+      features.storageClause
+    }
+    val sql = s"CREATE TABLE $tableName ($strSchema) $tableOptions"
     logger.logQuery(sql)
     statement.executeUpdate(sql)
   }
@@ -174,7 +194,7 @@ abstract class DmDialect(
   // ======================== RENAME TABLE ========================
 
   override def renameTable(oldTable: String, newTable: String): String = {
-    s"ALTER TABLE $oldTable RENAME TO $newTable"
+    s"ALTER TABLE ${quoteIdentifier(oldTable)} RENAME TO ${quoteIdentifier(newTable)}"
   }
 
   // ======================== ALTER TABLE ========================
@@ -313,7 +333,9 @@ abstract class DmDialect(
    * 根据 DmFunctionMapper 中的映射表进行判断。
    */
   override def isSupportedFunction(funcName: String): Boolean = {
-    DmFunctionMapper.getMapping(funcName).isDefined
+    // 仅当 Spark 函数名与达梦函数名相同时才允许下推执行
+    // 因为 JDBCSQLBuilder 不能翻译函数名（dialectFunctionName 默认返回原名）
+    DmFunctionMapper.isDirectMapping(funcName)
   }
 
   // ======================== 异常分类 ========================
@@ -444,6 +466,75 @@ abstract class DmDialect(
       logger.debug(s"达梦数据库连接已建立 (partition=$partitionId)")
       connection
     }
+  }
+  // ======================== 截断表行为 ========================
+
+  /**
+   * 达梦 TRUNCATE TABLE 默认不级联
+   */
+  override def isCascadingTruncateTable(): Option[Boolean] = Some(false)
+
+  /**
+   * 双参数版本的 TRUNCATE（Spark 内部调用的主要版本）
+   */
+  override def getTruncateQuery(
+    table: String,
+    cascade: Option[Boolean] = isCascadingTruncateTable()
+  ): String = {
+    cascade match {
+      case Some(true) => s"TRUNCATE TABLE ${quoteIdentifier(table)} CASCADE"
+      case _          => s"TRUNCATE TABLE ${quoteIdentifier(table)}"
+    }
+  }
+
+  // ======================== 连接优化 ========================
+
+  /**
+   * 查询前的连接预处理
+   *
+   * 当 fetchSize > 0 时设置 autocommit=false，使达梦 JDBC 驱动
+   * 支持游标模式批量读取，避免一次性加载全部数据到内存。
+   */
+  override def beforeFetch(connection: Connection, properties: Map[String, String]): Unit = {
+    super.beforeFetch(connection, properties)
+    val batchFetchSize = properties.getOrElse("fetchsize", properties.getOrElse(
+      "batchsize", "0")).toInt
+    if (batchFetchSize > 0) {
+      connection.setAutoCommit(false)
+    }
+  }
+
+  // ======================== 值编译（谓词下推中的字面量格式化） ========================
+
+  override def compileValue(value: Any): Any = value match {
+    case stringValue: String =>
+      s"'${escapeSql(stringValue)}'"
+    case binaryValue: Array[Byte] =>
+      // 达梦使用 TO_BLOB('hex_string') 函数，或直接用 X'hex' 格式
+      binaryValue.map("%02X".format(_)).mkString("X'", "", "'")
+    case _ =>
+      super.compileValue(value)
+  }
+
+  // ======================== 时间戳转换 ========================
+
+  /**
+   * 将 JDBC Timestamp 转换为 TimestampNTZ 的 LocalDateTime
+   *
+   * 与 PostgresDialect 一致，使用 Timestamp.toLocalDateTime() 直接转换，
+   * JDBC 驱动返回的时间戳已代表数据库中的 wall-clock 时间。
+   */
+  override def convertJavaTimestampToTimestampNTZ(t: java.sql.Timestamp): java.time.LocalDateTime = {
+    t.toLocalDateTime
+  }
+
+  /**
+   * 将 TimestampNTZ 的 LocalDateTime 转换为 JDBC Timestamp
+   */
+  override def convertTimestampNTZToJavaTimestamp(
+    ldt: java.time.LocalDateTime
+  ): java.sql.Timestamp = {
+    java.sql.Timestamp.valueOf(ldt)
   }
 }
 

@@ -5,7 +5,6 @@ import java.util.Locale
 
 import cn.qinwh.spark.dm.config.{DmConfigParser, DmDialectConfig}
 import cn.qinwh.spark.dm.utils.{DmConstants, DmLogger}
-import cn.qinwh.spark.dm.version.DmVersionDetector
 
 import org.apache.spark.SparkThrowable
 import org.apache.spark.sql.AnalysisException
@@ -18,17 +17,13 @@ import org.apache.spark.sql.types._
 /**
  * 达梦方言 SPI 代理类
  *
- * 这是通过 Java ServiceLoader 注册的方言入口点。
- * 在 Spark 调用 `canHandle(url)` 时匹配 `jdbc:dm://` 前缀的 URL，
- * 并在首次需要具体操作时根据配置提示创建 Dm7Dialect 或 Dm8Dialect 代理实例。
- *
- * ==SPI 注册==
- * 该类已在 `META-INF/services/org.apache.spark.sql.jdbc.JdbcDialect` 中注册。
+ * 通过 Java ServiceLoader 注册的方言入口点。在 `createConnectionFactory` 中
+ * 完成配置解析和版本选择，后续所有调用委托给 Dm7Dialect 或 Dm8Dialect。
  *
  * ==工作流程==
  * 1. Spark 通过 ServiceLoader 加载本类
  * 2. `canHandle(url)` 匹配 `jdbc:dm://` 前缀的 URL
- * 3. 首次需要类型映射/SQL 生成/连接时，根据配置解析创建代理方言
+ * 3. `createConnectionFactory` 解析 JDBCOptions，选择 Dm7Dialect 或 Dm8Dialect
  * 4. 后续所有调用委托给具体的版本方言实现
  *
  * @author qinwh
@@ -37,7 +32,7 @@ class DmDialectProvider extends JdbcDialect {
 
   @volatile private var _logger: DmLogger = DmLogger()
 
-  /** 延迟初始化的版本方言代理实例 */
+  /** 版本方言代理实例（在 createConnectionFactory 中初始化） */
   @volatile private var _delegate: Option[DmDialect] = None
 
   private val initLock = new Object()
@@ -52,38 +47,23 @@ class DmDialectProvider extends JdbcDialect {
 
   // ======================== 代理初始化 ========================
 
-  private def ensureInitialized(jdbcOptions: Option[Map[String, String]] = None): DmDialect = {
+  /**
+   * 确保委托方言已初始化
+   *
+   * 优先在 createConnectionFactory 中通过 JDBCOptions 初始化；
+   * 如果尚未初始化（如仅调用类型映射方法），使用默认配置 DM8。
+   */
+  private def ensureInitialized(): DmDialect = {
     if (_delegate.isEmpty) {
       initLock.synchronized {
         if (_delegate.isEmpty) {
-          val options = jdbcOptions.getOrElse(Map.empty)
-
-          // 解析配置
-          val config = DmConfigParser.parse(options)
-          _logger = DmLogger(config.loggingEnabled, config.logQueries)
-
-          // 根据配置提示选择版本
-          val versionHint = options.getOrElse("spark.dmdialect.versionHint", "8")
-          val dialect = versionHint match {
-            case "7" =>
-              _logger.info("根据配置提示使用 DM7 方言")
-              Dm7Dialect(config)
-            case _ =>
-              _logger.info("根据配置提示使用 DM8 方言")
-              Dm8Dialect(config)
-          }
-
+          val dialect = Dm8Dialect(DmDialectConfig.defaultConfig)
+          _logger.info(s"达梦方言延迟初始化: ${dialect.getClass.getSimpleName}")
           _delegate = Some(dialect)
-          _logger.info(s"达梦方言已初始化: ${dialect.getClass.getSimpleName}")
         }
       }
     }
-    _delegate.getOrElse {
-      // 无配置时默认使用 DM8
-      val defaultDialect = Dm8Dialect(DmDialectConfig.defaultConfig)
-      _delegate = Some(defaultDialect)
-      defaultDialect
-    }
+    _delegate.get
   }
 
   private def delegate: DmDialect = ensureInitialized()
@@ -105,6 +85,10 @@ class DmDialectProvider extends JdbcDialect {
   override def getTableExistsQuery(table: String): String = delegate.getTableExistsQuery(table)
   override def getSchemaQuery(table: String): String = delegate.getSchemaQuery(table)
   override def getTruncateQuery(table: String): String = delegate.getTruncateQuery(table)
+  override def getTruncateQuery(
+    table: String, cascade: Option[Boolean]
+  ): String = delegate.getTruncateQuery(table, cascade)
+  override def isCascadingTruncateTable(): Option[Boolean] = delegate.isCascadingTruncateTable()
 
   // ======================== 分页委托 ========================
 
@@ -117,7 +101,6 @@ class DmDialectProvider extends JdbcDialect {
 
   override def supportsTableSample: Boolean = true
   override def getTableSample(sample: TableSampleInfo): String = delegate.getTableSample(sample)
-
   override def supportsJoin: Boolean = true
 
   // ======================== CREATE TABLE 委托 ========================
@@ -127,28 +110,20 @@ class DmDialectProvider extends JdbcDialect {
     tableName: String,
     strSchema: String,
     options: JdbcOptionsInWrite
-  ): Unit = {
-    delegate.createTable(statement, tableName, strSchema, options)
-  }
+  ): Unit = delegate.createTable(statement, tableName, strSchema, options)
 
-  // ======================== INSERT 委托 ========================
+  // ======================== INSERT / DROP / RENAME 委托 ========================
 
   override def insertIntoTable(table: String, fields: Array[StructField]): String =
     delegate.insertIntoTable(table, fields)
-
-  // ======================== DROP TABLE 委托 ========================
-
   override def dropTable(table: String): String = delegate.dropTable(table)
-
   override def renameTable(oldTable: String, newTable: String): String =
     delegate.renameTable(oldTable, newTable)
 
   // ======================== ALTER TABLE 委托 ========================
 
   override def alterTable(
-    tableName: String,
-    changes: Seq[TableChange],
-    dbMajorVersion: Int
+    tableName: String, changes: Seq[TableChange], dbMajorVersion: Int
   ): Array[String] = delegate.alterTable(tableName, changes, dbMajorVersion)
 
   override def getAddColumnQuery(tableName: String, columnName: String, dataType: String): String =
@@ -169,7 +144,7 @@ class DmDialectProvider extends JdbcDialect {
     tableName: String, columnName: String, isNullable: Boolean
   ): String = delegate.getUpdateColumnNullabilityQuery(tableName, columnName, isNullable)
 
-  // ======================== 表注释委托 ========================
+  // ======================== 注释委托 ========================
 
   override def getTableCommentQuery(table: String, comment: String): String =
     delegate.getTableCommentQuery(table, comment)
@@ -182,11 +157,8 @@ class DmDialectProvider extends JdbcDialect {
   // ======================== 异常分类委托 ========================
 
   override def classifyException(
-    e: Throwable,
-    condition: String,
-    messageParameters: Map[String, String],
-    description: String,
-    isRuntime: Boolean
+    e: Throwable, condition: String,
+    messageParameters: Map[String, String], description: String, isRuntime: Boolean
   ): Throwable with SparkThrowable =
     delegate.classifyException(e, condition, messageParameters, description, isRuntime)
 
@@ -200,11 +172,51 @@ class DmDialectProvider extends JdbcDialect {
   override def isObjectNotFoundException(e: SQLException): Boolean =
     delegate.isObjectNotFoundException(e)
 
+  // ======================== 连接优化委托 ========================
+
+  override def beforeFetch(connection: Connection, properties: Map[String, String]): Unit =
+    delegate.beforeFetch(connection, properties)
+
+  // ======================== 值编译委托 ========================
+
+  override def compileValue(value: Any): Any = delegate.compileValue(value)
+
+  // ======================== 时间戳转换委托 ========================
+
+  override def convertJavaTimestampToTimestampNTZ(
+    t: java.sql.Timestamp
+  ): java.time.LocalDateTime = delegate.convertJavaTimestampToTimestampNTZ(t)
+
+  override def convertTimestampNTZToJavaTimestamp(
+    ldt: java.time.LocalDateTime
+  ): java.sql.Timestamp = delegate.convertTimestampNTZToJavaTimestamp(ldt)
+
   // ======================== 连接工厂委托 ========================
 
+  /**
+   * 创建达梦 JDBC 连接工厂
+   *
+   * 这是 Provider 的核心初始化点：
+   * 从 JDBCOptions 解析配置，根据 versionHint 选择 Dm7Dialect 或 Dm8Dialect。
+   */
   override def createConnectionFactory(options: JDBCOptions): Int => Connection = {
     val scalaOptions = options.parameters.toMap
-    ensureInitialized(Some(scalaOptions)).createConnectionFactory(options)
+    val config = DmConfigParser.parse(scalaOptions)
+    _logger = DmLogger(config.loggingEnabled, config.logQueries)
+
+    val versionHint = scalaOptions.getOrElse("spark.dmdialect.versionHint", "8")
+    val dialect = versionHint match {
+      case "7" =>
+        _logger.info("根据配置提示使用 DM7 方言")
+        Dm7Dialect(config)
+      case _ =>
+        _logger.info("根据配置提示使用 DM8 方言")
+        Dm8Dialect(config)
+    }
+
+    _delegate = Some(dialect)
+    _logger.info(s"达梦方言已初始化: ${dialect.getClass.getSimpleName}")
+    dialect.createConnectionFactory(options)
   }
 
   override def toString: String = s"DmDialectProvider(delegate=${_delegate.getOrElse("未初始化")})"

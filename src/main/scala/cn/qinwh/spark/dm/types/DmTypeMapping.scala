@@ -207,6 +207,32 @@ class DmTypeMapping(config: DmDialectConfig) {
       case _: Exception => 0
     }
   }
+
+  /**
+   * 为列字段获取 JDBC 类型（支持 CLOB 大字符串自动选择）
+   *
+   * 当 StringType 列的最大长度超过 CLOB_THRESHOLD_BYTES (8188) 时，
+   * 自动使用 CLOB 类型而非 VARCHAR2。
+   *
+   * @param field Spark StructField（含 metadata 中的长度信息）
+   * @return 达梦 JDBC 类型定义
+   */
+  def getJDBCTypeForField(field: org.apache.spark.sql.types.StructField): JdbcType = {
+    field.dataType match {
+      case StringType =>
+        val maxLength = if (field.metadata.contains("maxlength")) {
+          field.metadata.getLong("maxlength")
+        } else {
+          DEFAULT_VARCHAR2_SIZE.toLong
+        }
+        if (maxLength > CLOB_THRESHOLD_BYTES) {
+          JdbcType("CLOB", java.sql.Types.CLOB)
+        } else {
+          JdbcType(s"VARCHAR2($maxLength)", java.sql.Types.VARCHAR)
+        }
+      case _ => getJDBCType(field.dataType)
+    }
+  }
 }
 
 object DmTypeMapping {

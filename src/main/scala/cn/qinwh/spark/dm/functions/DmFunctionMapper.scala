@@ -175,6 +175,24 @@ object DmFunctionMapper {
   }
 
   /**
+   * 检查函数是否为同名映射（忽略大小写）
+   *
+   * 仅当 Spark 函数名与达梦函数名完全一致（忽略大小写）时返回 true。
+   * 对于名称不同的函数（如 datediff->DATEDIFF），返回 false。
+   *
+   * 此方法用于 isSupportedFunction，因为 JDBCSQLBuilder 只能
+   * 检查函数是否支持，无法翻译函数名（内建 dialectFunctionName
+   * 默认返回原名）。因此只有同名函数才能安全地推送到数据库执行。
+   *
+   * @param sparkFunction Spark SQL 函数名
+   * @return 如果是同名映射则为 true
+   */
+  def isDirectMapping(sparkFunction: String): Boolean = {
+    mappings.get(sparkFunction.toLowerCase).exists(m =>
+      m.sparkFunction.equalsIgnoreCase(m.dmFunction))
+  }
+
+  /**
    * 获取所有已注册的函数映射
    *
    * @return 所有函数映射的 Map
