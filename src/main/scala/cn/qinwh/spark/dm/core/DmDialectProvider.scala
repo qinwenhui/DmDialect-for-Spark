@@ -128,8 +128,7 @@ class DmDialectProvider extends JdbcDialect {
     strSchema: String,
     options: JdbcOptionsInWrite
   ): Unit = {
-    val scalaOptions = options.parameters.toMap
-    ensureInitialized(Some(scalaOptions)).createTable(statement, tableName, strSchema, options)
+    delegate.createTable(statement, tableName, strSchema, options)
   }
 
   // ======================== INSERT 委托 ========================
