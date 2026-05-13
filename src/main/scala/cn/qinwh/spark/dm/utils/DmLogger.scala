@@ -12,7 +12,7 @@ import org.slf4j.{Logger, LoggerFactory}
  */
 class DmLogger(debugEnabled: Boolean, logQueries: Boolean) extends Serializable {
 
-  private val logger: Logger = LoggerFactory.getLogger(classOf[DmLogger])
+  @transient private lazy val logger: Logger = LoggerFactory.getLogger(classOf[DmLogger])
 
   /** 记录调试信息（仅在 debugEnabled 为 true 时输出） */
   def debug(msg: => String): Unit = {

@@ -35,7 +35,7 @@ class DmDialectProvider extends JdbcDialect {
   /** 版本方言代理实例（在 createConnectionFactory 中初始化） */
   @volatile private var _delegate: Option[DmDialect] = None
 
-  private val initLock = new Object()
+  @transient private lazy val initLock = new Object()
 
   // ======================== 方言识别 ========================
 
