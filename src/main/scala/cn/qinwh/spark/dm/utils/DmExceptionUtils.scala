@@ -157,6 +157,7 @@ object DmExceptionUtils {
    */
   private def classifyDataException(ex: SQLException): DmExceptionCategory = {
     ex.getSQLState match {
+      case "22000" => DmExceptionCategory.ObjectNotFound(ex)
       case "22001" => DmExceptionCategory.DataTruncation(ex)
       case "22003" => DmExceptionCategory.NumericOverflow(ex)
       case "22005" => DmExceptionCategory.InvalidValue(ex)
